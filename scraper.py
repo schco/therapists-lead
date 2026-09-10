@@ -12,9 +12,11 @@ from bs4 import BeautifulSoup
 try:
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
+    from webdriver_manager.chrome import ChromeDriverManager
     SELENIUM_AVAILABLE = True
 except ImportError:
     SELENIUM_AVAILABLE = False
@@ -163,11 +165,14 @@ def scrape_with_selenium(city: str, state: str, max_pages: int = 3) -> tuple[lis
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
     options.add_argument(f"user-agent={HEADERS['User-Agent']}")
 
     driver = None
     try:
-        driver = webdriver.Chrome(options=options)
+        # Automatically download and manage ChromeDriver
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
         driver.set_page_load_timeout(30)
 
         for page in range(1, max_pages + 1):
