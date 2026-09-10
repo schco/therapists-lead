@@ -1,121 +1,217 @@
-"""Best-effort scrapers for Psychology Today and Google Maps.
-
-Scraping public directories can fail because of rate limits, markup changes, or
-bot checks. Each source is isolated so a failure still allows the other source
-and any previously stored leads to be used.
-"""
+"""Web scraping module for Psychology Today therapist profiles."""
 
 from __future__ import annotations
 
-import re
 import time
-from datetime import date
-from urllib.parse import quote_plus, urljoin
+import re
+from typing import Any
 
 import requests
 from bs4 import BeautifulSoup
 
-HEADERS = {"User-Agent": "TherapistLeadFinder/1.0 (local research tool)"}
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
 
 
-def _clean(value: str | None) -> str:
-    return re.sub(r"\s+", " ", value or "").strip()
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
+}
 
 
-def _phone(text: str) -> str:
-    match = re.search(r"(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}", text)
-    return _clean(match.group(0) if match else "")
+def build_psychology_today_url(city: str, state: str) -> str:
+    """Build a Psychology Today search URL for a city/state."""
+    city_slug = city.lower().strip().replace(" ", "-")
+    state_slug = state.lower().strip()
+    return f"https://www.psychologytoday.com/us/therapists/{state_slug}/{city_slug}"
 
 
-def _location_parts(city: str, state: str) -> tuple[str, str]:
-    return _clean(city), _clean(state).upper()
-
-
-def scrape_psychology_today(city: str, state: str, radius: int = 20, pages: int = 2) -> tuple[list[dict], list[str]]:
-    """Scrape publicly visible Psychology Today search result cards."""
-    results, errors = [], []
-    city, state = _location_parts(city, state)
-    for page in range(1, pages + 1):
-        url = f"https://www.psychologytoday.com/us/therapists/{state.lower()}/{quote_plus(city.lower())}?page={page}"
-        try:
-            response = requests.get(url, headers=HEADERS, timeout=20)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, "html.parser")
-            cards = soup.select("div.results-row, article.profile-card, .profile-card")
-            for card in cards:
-                name_node = card.select_one("h2, h3, .profile-title, .profile-name")
-                name = _clean(name_node.get_text(" ", strip=True) if name_node else "")
-                if not name:
-                    continue
-                profile = card.select_one("a[href*='/profile/'], a[href*='/us/therapists/']")
-                profile_url = urljoin(url, profile.get("href", "")) if profile else ""
-                text = _clean(card.get_text(" ", strip=True))
-                specialties = _clean((card.select_one(".specialty, .profile-specialties") or card).get_text(" ", strip=True))
-                results.append({
-                    "name": name, "credentials": "", "specialties": specialties, "phone": _phone(text),
-                    "email": "", "website": profile_url, "address": "", "city": city, "state": state,
-                    "zip": "", "source": "Psychology Today", "practice_size": "unknown", "profile_url": profile_url,
-                    "date_scraped": date.today().isoformat(),
-                })
-            time.sleep(1.5)
-        except requests.RequestException as exc:
-            errors.append(f"Psychology Today page {page}: {exc}")
-        except Exception as exc:  # Keep one malformed card from stopping a search.
-            errors.append(f"Psychology Today page {page}: {exc}")
-    return _deduplicate(results), errors
-
-
-def scrape_google_maps(city: str, state: str, radius: int = 20, max_results: int = 20) -> tuple[list[dict], list[str]]:
-    """Use Selenium when installed; otherwise return a clear, non-fatal warning."""
+def parse_profile_card(card: BeautifulSoup) -> dict[str, Any] | None:
+    """Extract structured data from a single Psychology Today listing card."""
     try:
-        from selenium import webdriver
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.chrome.options import Options
-    except ImportError:
-        return [], ["Google Maps skipped: install selenium and a Chrome/Chromium driver to enable it."]
+        # Name and profile link
+        name_link = card.find("a", href=re.compile(r"/us/therapists/"))
+        if not name_link:
+            return None
+        name = name_link.get_text(strip=True)
 
-    results, errors = [], []
+        # Profile URL
+        profile_url = name_link.get("href", "")
+        if profile_url and not profile_url.startswith("http"):
+            profile_url = "https://www.psychologytoday.com" + profile_url
+
+        # Credentials (often in a subtitle or span)
+        credentials = ""
+        cred_el = card.find(class_=re.compile(r"credential|title|subtitle", re.I))
+        if cred_el:
+            credentials = cred_el.get_text(strip=True)
+
+        # Description / bio
+        description = ""
+        desc_el = card.find(class_=re.compile(r"description|bio|text", re.I))
+        if desc_el:
+            description = desc_el.get_text(strip=True)[:1000]
+
+        # Specialties (tags)
+        specialties = []
+        for tag in card.find_all(class_=re.compile(r"specialt|tag|issue", re.I)):
+            text = tag.get_text(strip=True)
+            if text and len(text) < 60:
+                specialties.append(text)
+        specialties = list(dict.fromkeys(specialties))[:10]
+
+        # Verified badge
+        verified = bool(card.find(class_=re.compile(r"verified", re.I)))
+
+        # Phone
+        phone = ""
+        phone_el = card.find(string=re.compile(r"\(\d{3}\)\s*\d{3}-\d{4}"))
+        if phone_el:
+            match = re.search(r"\(\d{3}\)\s*\d{3}-\d{4}", str(phone_el))
+            if match:
+                phone = match.group(0)
+
+        # Location
+        city = ""
+        state = ""
+        zip_code = ""
+        location_el = card.find(class_=re.compile(r"location|address", re.I))
+        if location_el:
+            loc_text = location_el.get_text(" ", strip=True)
+            loc_match = re.search(r"([A-Za-z\s]+),\s*([A-Z]{2})\s*(\d{5})?", loc_text)
+            if loc_match:
+                city = loc_match.group(1).strip()
+                state = loc_match.group(2)
+                zip_code = loc_match.group(3) or ""
+
+        return {
+            "name": name,
+            "credentials": credentials,
+            "specialties": ", ".join(specialties),
+            "description": description,
+            "phone": phone,
+            "city": city,
+            "state": state,
+            "zip": zip_code,
+            "website": "",
+            "verified": 1 if verified else 0,
+            "profile_url": profile_url,
+            "source": "Psychology Today",
+            "practice_size": "solo",
+            "fee": "",
+            "insurance": "",
+            "telehealth": "",
+            "pronouns": "",
+            "modalities": "",
+            "populations": "",
+        }
+    except Exception:
+        return None
+
+
+def scrape_with_requests(city: str, state: str, max_pages: int = 3) -> tuple[list[dict], list[str]]:
+    """Scrape Psychology Today using requests + BeautifulSoup (static fallback)."""
+    therapists = []
+    errors = []
+    base_url = build_psychology_today_url(city, state)
+
+    for page in range(1, max_pages + 1):
+        url = f"{base_url}?page={page}" if page > 1 else base_url
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+            if resp.status_code != 200:
+                errors.append(f"Page {page} returned status {resp.status_code}")
+                break
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            cards = soup.find_all(class_=re.compile(r"result-row|profile-card", re.I))
+
+            if not cards:
+                break
+
+            for card in cards:
+                parsed = parse_profile_card(card)
+                if parsed:
+                    therapists.append(parsed)
+
+            time.sleep(1)  # Be respectful to the server
+
+        except Exception as e:
+            errors.append(f"Error scraping page {page}: {e}")
+            break
+
+    return therapists, errors
+
+
+def scrape_with_selenium(city: str, state: str, max_pages: int = 3) -> tuple[list[dict], list[str]]:
+    """Scrape Psychology Today using Selenium (handles dynamic JS content)."""
+    therapists = []
+    errors = []
+    base_url = build_psychology_today_url(city, state)
+
     options = Options()
-    options.add_argument("--headless=new")
+    options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument(f"user-agent={HEADERS['User-Agent']}")
+
     driver = None
     try:
         driver = webdriver.Chrome(options=options)
-        query = quote_plus(f"therapist {city}, {state}")
-        driver.get(f"https://www.google.com/maps/search/{query}")
-        time.sleep(3)
-        cards = driver.find_elements(By.CSS_SELECTOR, "div[role='article']")[:max_results]
-        for card in cards:
-            text = _clean(card.text)
-            lines = [line.strip() for line in text.splitlines() if line.strip()]
-            if not lines:
-                continue
-            link = card.find_elements(By.CSS_SELECTOR, "a[href]")
-            website = link[0].get_attribute("href") if link else ""
-            results.append({
-                "name": lines[0], "credentials": "", "specialties": "therapist", "phone": _phone(text),
-                "email": "", "website": website, "address": " ".join(lines[1:3]), "city": city,
-                "state": state.upper(), "zip": "", "source": "Google Maps", "practice_size": "unknown",
-                "profile_url": website, "date_scraped": date.today().isoformat(),
-            })
-    except Exception as exc:
-        errors.append(f"Google Maps: {exc}")
+        driver.set_page_load_timeout(30)
+
+        for page in range(1, max_pages + 1):
+            url = f"{base_url}?page={page}" if page > 1 else base_url
+            driver.get(url)
+
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located(
+                        (By.CSS_SELECTOR, "[class*='result-row'], [class*='profile-card']")
+                    )
+                )
+            except Exception:
+                errors.append(f"Page {page}: timeout waiting for results")
+                break
+
+            soup = BeautifulSoup(driver.page_source, "html.parser")
+            cards = soup.find_all(class_=re.compile(r"result-row|profile-card", re.I))
+
+            if not cards:
+                break
+
+            for card in cards:
+                parsed = parse_profile_card(card)
+                if parsed:
+                    therapists.append(parsed)
+
+            time.sleep(2)
+
+    except Exception as e:
+        errors.append(f"Selenium error: {e}")
     finally:
         if driver:
             driver.quit()
-    return _deduplicate(results), errors
+
+    return therapists, errors
 
 
 def scrape_all(city: str, state: str, radius: int = 20) -> tuple[list[dict], list[str]]:
-    psychology_results, psychology_errors = scrape_psychology_today(city, state, radius)
-    maps_results, maps_errors = scrape_google_maps(city, state, radius)
-    return _deduplicate(psychology_results + maps_results), psychology_errors + maps_errors
+    """Main entry point: try Selenium first, fall back to requests."""
+    if SELENIUM_AVAILABLE:
+        therapists, errors = scrape_with_selenium(city, state)
+        if therapists:
+            return therapists, errors
+        errors.append("Selenium returned no results; falling back to requests.")
 
-
-def _deduplicate(items: list[dict]) -> list[dict]:
-    unique = {}
-    for item in items:
-        key = (item.get("name", "").lower(), item.get("city", "").lower(), item.get("phone", ""))
-        unique[key] = item
-    return list(unique.values())
+    return scrape_with_requests(city, state)
