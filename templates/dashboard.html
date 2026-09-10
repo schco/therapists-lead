@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}CRM dashboard{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">OUTREACH CRM</p><h1>Keep the human part visible.</h1><p class="muted">A quick read on every lead in your local directory.</p></div><a class="button button-primary" href="{{ url_for('index') }}">Find more leads &#8594;</a></div>
+<div class="metric-grid">{% for key, label in [('total','All leads'),('not_contacted','Not contacted'),('contacted','Contacted'),('interested','Interested'),('signed','Signed'),('declined','Declined')] %}<div class="metric"><span>{{ label }}</span><strong>{{ counts[key] }}</strong></div>{% endfor %}</div>
+<section class="dashboard-grid"><div class="template-panel"><div class="section-kicker">Ready to send</div><h2>Outreach templates</h2>{% for title, body in templates.items() %}<details><summary>{{ title }} <span>+</span></summary><textarea readonly>{{ body }}</textarea></details>{% endfor %}</div><div class="tip-panel"><div class="section-kicker">A useful next move</div><h2>Start with the warmest fit.</h2><p>Prioritize leads with multiple specialty matches, a solo practice, and an easy-to-find contact path. A thoughtful, specific first note beats a high-volume sequence.</p><a class="text-link" href="{{ url_for('export_csv') }}">Export working list &#8594;</a></div></section>
+{% endblock %}

@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Find therapists{% endblock %}
+{% block content %}
+<section class="hero-panel">
+  <div>
+    <p class="eyebrow">LOCAL REFERRAL INTELLIGENCE</p>
+    <h1>Build a better therapist referral bench.</h1>
+    <p class="hero-copy">Find practices near your clients, match by specialty, and keep every outreach step in one calm workspace.</p>
+  </div>
+  <div class="hero-mark" aria-hidden="true">TLF</div>
+</section>
+<section class="workspace-grid">
+  <div class="form-panel">
+    <div class="section-kicker">New search</div>
+    <h2>Who are you looking for?</h2>
+    <form method="post" class="search-form">
+      <label for="need">Therapy need</label>
+      <select id="need" name="need" required>
+        {% for need in needs %}<option value="{{ need.need_name }}">{{ need.need_name }}</option>{% endfor %}
+      </select>
+      <label for="location">City and state</label>
+      <input id="location" name="location" value="{{ default_location }}" placeholder="Old Bridge, NJ" required>
+      <label for="radius">Search radius <span class="muted">miles</span></label>
+      <input id="radius" name="radius" type="number" min="1" max="100" value="20" required>
+      <button class="button button-primary" type="submit">Find therapists <span aria-hidden="true">&#8594;</span></button>
+    </form>
+  </div>
+  <aside class="info-panel">
+    <div class="section-kicker">Workflow</div>
+    <div class="workflow-step"><span>01</span><p><strong>Search</strong><br>Pull public directory listings for a target area.</p></div>
+    <div class="workflow-step"><span>02</span><p><strong>Match</strong><br>Rank results against the selected client need.</p></div>
+    <div class="workflow-step"><span>03</span><p><strong>Reach out</strong><br>Track conversations and export your working list.</p></div>
+  </aside>
+</section>
+{% endblock %}
