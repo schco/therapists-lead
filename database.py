@@ -1,171 +1,240 @@
-"""SQLite persistence helpers for Therapist Lead Finder."""
+"""SQLite database operations for therapist lead management."""
 
 from __future__ import annotations
 
 import csv
 import io
 import sqlite3
-from datetime import date
 from pathlib import Path
-from typing import Iterable
+from typing import Any
 
-BASE_DIR = Path(__file__).resolve().parent
-DATABASE_PATH = BASE_DIR / "therapists.db"
+DB_PATH = Path(__file__).parent / "therapists.db"
 
-THERAPY_NEEDS = [
-    ("Adult ADHD", "adhd,attention,executive function,neurodiversity"),
-    ("Anxiety", "anxiety,panic,worry,stress"),
-    ("Couples Therapy", "couples,marriage,relationship,partner"),
-    ("Depression", "depression,mood,low mood"),
-    ("Grief Counseling", "grief,loss,bereavement"),
-    ("Trauma and PTSD", "trauma,ptsd,emdr,post traumatic"),
-    ("Child and Teen Therapy", "child,teen,adolescent,youth"),
+DEFAULT_NEEDS = [
+    ("Adult ADHD", "adhd,attention,executive function,add"),
+    ("Couples Therapy", "couples,marriage,relationship,premarital,divorce"),
+    ("Grief Counseling", "grief,loss,bereavement,mourning"),
+    ("Anxiety", "anxiety,panic,ocd,phobia,worry"),
+    ("Trauma / PTSD", "trauma,ptsd,emdr,dissociative"),
+    ("Depression", "depression,mood,dysthymia"),
+    ("Child / Adolescent", "child,adolescent,teen,pediatric,play therapy"),
     ("Family Therapy", "family,parenting,family systems"),
 ]
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS therapists (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    credentials TEXT DEFAULT '',
-    specialties TEXT DEFAULT '',
-    phone TEXT DEFAULT '',
-    email TEXT DEFAULT '',
-    website TEXT DEFAULT '',
-    address TEXT DEFAULT '',
-    city TEXT DEFAULT '',
-    state TEXT DEFAULT '',
-    zip TEXT DEFAULT '',
-    source TEXT DEFAULT '',
-    practice_size TEXT DEFAULT 'unknown',
-    profile_url TEXT DEFAULT '',
-    date_scraped TEXT NOT NULL,
-    outreach_status TEXT NOT NULL DEFAULT 'not_contacted',
-    notes TEXT DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS client_needs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    need_name TEXT NOT NULL UNIQUE,
-    keywords TEXT NOT NULL
-);
-"""
-
 
 def get_connection() -> sqlite3.Connection:
-    connection = sqlite3.connect(DATABASE_PATH)
-    connection.row_factory = sqlite3.Row
-    return connection
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def init_db() -> None:
-    with get_connection() as connection:
-        connection.executescript(SCHEMA)
-        connection.executemany(
+    """Create tables and seed default client needs."""
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS therapists (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            credentials TEXT,
+            specialties TEXT,
+            phone TEXT,
+            email TEXT,
+            website TEXT,
+            address TEXT,
+            city TEXT,
+            state TEXT,
+            zip TEXT,
+            source TEXT,
+            practice_size TEXT,
+            profile_url TEXT,
+            date_scraped TEXT DEFAULT CURRENT_TIMESTAMP,
+            outreach_status TEXT DEFAULT 'not_contacted',
+            notes TEXT,
+            pronouns TEXT,
+            verified INTEGER DEFAULT 0,
+            modalities TEXT,
+            populations TEXT,
+            fee TEXT,
+            insurance TEXT,
+            telehealth TEXT,
+            recruitment_score INTEGER DEFAULT 0,
+            match_count INTEGER DEFAULT 0
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS client_needs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            need_name TEXT UNIQUE NOT NULL,
+            keywords TEXT NOT NULL
+        )
+    """)
+
+    for need_name, keywords in DEFAULT_NEEDS:
+        cur.execute(
             "INSERT OR IGNORE INTO client_needs (need_name, keywords) VALUES (?, ?)",
-            THERAPY_NEEDS,
+            (need_name, keywords),
         )
 
-
-def get_needs() -> list[sqlite3.Row]:
-    with get_connection() as connection:
-        return connection.execute("SELECT * FROM client_needs ORDER BY need_name").fetchall()
+    conn.commit()
+    conn.close()
 
 
-def save_therapists(therapists: Iterable[dict]) -> int:
-    rows = list(therapists)
-    if not rows:
+def get_needs() -> list[dict]:
+    conn = get_connection()
+    rows = conn.execute("SELECT * FROM client_needs ORDER BY need_name").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def save_therapists(therapists: list[dict]) -> int:
+    """Insert or update therapist records. Returns number saved."""
+    if not therapists:
         return 0
-    with get_connection() as connection:
-        for therapist in rows:
-            existing = connection.execute(
-                "SELECT id FROM therapists WHERE name = ? AND COALESCE(phone, '') = ? AND city = ?",
-                (therapist.get("name", ""), therapist.get("phone", ""), therapist.get("city", "")),
-            ).fetchone()
-            values = (
-                therapist.get("name", "Unknown therapist"), therapist.get("credentials", ""),
-                therapist.get("specialties", ""), therapist.get("phone", ""), therapist.get("email", ""),
-                therapist.get("website", ""), therapist.get("address", ""), therapist.get("city", ""),
-                therapist.get("state", ""), therapist.get("zip", ""), therapist.get("source", ""),
-                therapist.get("practice_size", "unknown"), therapist.get("profile_url", ""),
-                therapist.get("date_scraped", date.today().isoformat()),
-            )
-            if existing:
-                connection.execute(
-                    """UPDATE therapists SET credentials=?, specialties=?, email=?, website=?, address=?,
-                    state=?, zip=?, source=?, practice_size=?, profile_url=?, date_scraped=? WHERE id=?""",
-                    (values[1], values[2], values[4], values[5], values[6], values[8], values[9], values[10],
-                     values[11], values[12], values[13], existing["id"]),
-                )
-            else:
-                connection.execute(
-                    """INSERT INTO therapists (name, credentials, specialties, phone, email, website, address,
-                    city, state, zip, source, practice_size, profile_url, date_scraped)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    values,
-                )
-        return len(rows)
 
+    conn = get_connection()
+    cur = conn.cursor()
+    saved = 0
 
-def _score_therapist(row: sqlite3.Row, keywords: list[str], location: str) -> tuple[int, int]:
-    haystack = f"{row['specialties']} {row['name']}".lower()
-    matches = sum(1 for keyword in keywords if keyword.strip().lower() in haystack)
-    score = matches
-    if row["practice_size"] == "solo":
-        score += 2
-    if not row["website"]:
-        score += 1
-    if location and location.lower() in f"{row['city']} {row['address']}".lower():
-        score += 1
-    return matches, min(10, max(1, score))
+    for t in therapists:
+        existing = cur.execute(
+            "SELECT id FROM therapists WHERE name = ? AND (profile_url = ? OR profile_url IS NULL)",
+            (t.get("name"), t.get("profile_url")),
+        ).fetchone()
 
-
-def find_matches(need_name: str, location: str = "") -> list[dict]:
-    with get_connection() as connection:
-        need = connection.execute("SELECT keywords FROM client_needs WHERE need_name = ?", (need_name,)).fetchone()
-        if not need:
-            return []
-        keywords = [item.strip() for item in need["keywords"].split(",") if item.strip()]
-        rows = connection.execute("SELECT * FROM therapists ORDER BY name").fetchall()
-    matches = []
-    for row in rows:
-        keyword_matches, recruitment_score = _score_therapist(row, keywords, location)
-        if keyword_matches:
-            item = dict(row)
-            item["keyword_matches"] = keyword_matches
-            item["recruitment_score"] = recruitment_score
-            matches.append(item)
-    return sorted(matches, key=lambda item: (-item["keyword_matches"], -item["recruitment_score"], item["name"]))
-
-
-def update_outreach(therapist_id: int, status: str, notes: str | None = None) -> None:
-    allowed = {"not_contacted", "contacted", "interested", "signed", "declined"}
-    if status not in allowed:
-        raise ValueError("Invalid outreach status")
-    with get_connection() as connection:
-        if notes is None:
-            connection.execute("UPDATE therapists SET outreach_status=? WHERE id=?", (status, therapist_id))
+        if existing:
+            cur.execute("""
+                UPDATE therapists SET
+                    credentials = COALESCE(?, credentials),
+                    specialties = COALESCE(?, specialties),
+                    phone = COALESCE(?, phone),
+                    website = COALESCE(?, website),
+                    city = COALESCE(?, city),
+                    state = COALESCE(?, state),
+                    zip = COALESCE(?, zip),
+                    verified = COALESCE(?, verified),
+                    profile_url = COALESCE(?, profile_url)
+                WHERE id = ?
+            """, (
+                t.get("credentials"), t.get("specialties"), t.get("phone"),
+                t.get("website"), t.get("city"), t.get("state"), t.get("zip"),
+                t.get("verified"), t.get("profile_url"), existing["id"],
+            ))
         else:
-            connection.execute("UPDATE therapists SET outreach_status=?, notes=? WHERE id=?", (status, notes, therapist_id))
+            cur.execute("""
+                INSERT INTO therapists
+                    (name, credentials, specialties, phone, email, website, address,
+                     city, state, zip, source, practice_size, profile_url,
+                     pronouns, verified, modalities, populations, fee, insurance, telehealth)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                t.get("name"), t.get("credentials"), t.get("specialties"),
+                t.get("phone"), t.get("email"), t.get("website"), t.get("address"),
+                t.get("city"), t.get("state"), t.get("zip"), t.get("source"),
+                t.get("practice_size"), t.get("profile_url"), t.get("pronouns"),
+                t.get("verified", 0), t.get("modalities"), t.get("populations"),
+                t.get("fee"), t.get("insurance"), t.get("telehealth"),
+            ))
+            saved += 1
+
+    conn.commit()
+    conn.close()
+    return saved
 
 
-def dashboard_counts() -> dict[str, int]:
-    with get_connection() as connection:
-        rows = connection.execute("SELECT outreach_status, COUNT(*) AS total FROM therapists GROUP BY outreach_status").fetchall()
-    counts = {status: 0 for status in ("not_contacted", "contacted", "interested", "signed", "declined")}
-    counts.update({row["outreach_status"]: row["total"] for row in rows})
+def find_matches(need: str, location: str = "") -> list[dict]:
+    """Find therapists matching a client need and optionally a location."""
+    conn = get_connection()
+
+    need_row = conn.execute(
+        "SELECT keywords FROM client_needs WHERE need_name = ?", (need,)
+    ).fetchone()
+
+    keywords = []
+    if need_row:
+        keywords = [k.strip().lower() for k in need_row["keywords"].split(",") if k.strip()]
+
+    if location:
+        city_filter = location.split(",")[0].strip()
+        rows = conn.execute(
+            "SELECT * FROM therapists WHERE city LIKE ? OR state LIKE ?",
+            (f"%{city_filter}%", f"%{location.split(',')[-1].strip()}%"),
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM therapists").fetchall()
+
+    conn.close()
+
+    results = []
+    for row in rows:
+        t = dict(row)
+        specialties_lower = (t.get("specialties") or "").lower()
+        description_lower = (t.get("description") or "").lower() if "description" in t else ""
+        combined = specialties_lower + " " + description_lower
+
+        match_count = sum(1 for kw in keywords if kw in combined)
+        if match_count > 0:
+            t["match_count"] = match_count
+            t["recruitment_score"] = calculate_recruitment_score(t)
+            results.append(t)
+
+    results.sort(key=lambda x: (x["match_count"], x["recruitment_score"]), reverse=True)
+    return results
+
+
+def calculate_recruitment_score(t: dict) -> int:
+    """Score a therapist on likelihood of joining the hybrid model (1-10)."""
+    score = 0
+    if t.get("practice_size") == "solo":
+        score += 3
+    if not t.get("website"):
+        score += 2
+    if t.get("verified"):
+        score += 1
+    if t.get("phone"):
+        score += 1
+    if t.get("specialties"):
+        score += 1
+    if not t.get("insurance"):
+        score += 1
+    return min(10, score)
+
+
+def update_outreach(therapist_id: int, status: str, notes: str | None) -> None:
+    conn = get_connection()
+    conn.execute(
+        "UPDATE therapists SET outreach_status = ?, notes = ? WHERE id = ?",
+        (status, notes, therapist_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def dashboard_counts() -> dict:
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT outreach_status, COUNT(*) as count FROM therapists GROUP BY outreach_status"
+    ).fetchall()
+    conn.close()
+    counts = {r["outreach_status"]: r["count"] for r in rows}
     counts["total"] = sum(counts.values())
     return counts
 
 
-def all_therapists() -> list[sqlite3.Row]:
-    with get_connection() as connection:
-        return connection.execute("SELECT * FROM therapists ORDER BY name").fetchall()
+def all_therapists() -> list[dict]:
+    conn = get_connection()
+    rows = conn.execute("SELECT * FROM therapists ORDER BY name").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
-def therapists_csv(rows: Iterable[dict | sqlite3.Row]) -> str:
-    fields = ["name", "credentials", "specialties", "phone", "email", "website", "address", "city", "state", "zip", "source", "practice_size", "profile_url", "date_scraped", "outreach_status", "notes"]
+def therapists_csv(therapists: list[dict]) -> str:
+    if not therapists:
+        return ""
     output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+    writer = csv.DictWriter(output, fieldnames=therapists[0].keys())
     writer.writeheader()
-    writer.writerows(dict(row) for row in rows)
+    writer.writerows(therapists)
     return output.getvalue()
